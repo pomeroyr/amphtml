@@ -559,6 +559,9 @@ class TimerEventHandler {
     this.callImmediate_ = 'immediate' in timerSpec ?
         Boolean(timerSpec['immediate']) : true;
 
+    /** @private {?function()} */
+    this.intervalCallback_ = null;
+
     /** @private {?UnlistenDef} */
     this.unlistenStart_ = null;
 
@@ -570,6 +573,15 @@ class TimerEventHandler {
 
     /** @private @const {?function(): UnlistenDef} */
     this.stopBuilder_ = opt_stopBuilder || null;
+
+    /** @private {number|undefined} */
+    this.startTime_ = undefined; // milliseconds
+
+    /** @private {number|undefined} */
+    this.lastPingTime_ = undefined; // milliseconds
+
+    /** @private {number} */
+    this.timerDuration_ = 0; // milliseconds
   }
 
   /**
@@ -639,7 +651,10 @@ class TimerEventHandler {
     if (this.isRunning()) {
       return;
     }
-
+    this.startTime_ = Date.now();
+    this.lastPingTime_ = undefined;
+    this.timerDuration_ = 0;
+    this.intervalCallback_ = timerCallback;
     this.intervalId_ = win.setInterval(() => {
       timerCallback();
     }, this.intervalLength_ * 1000);
@@ -667,8 +682,35 @@ class TimerEventHandler {
     }
     win.clearInterval(this.intervalId_);
     this.intervalId_ = undefined;
+    this.calculateDuration_();
+    this.lastPingTime_ = undefined;
+    this.intervalCallback_();
+    this.intervalCallback_ = null;
     this.unlistenForStop_();
     this.listenForStart_();
+  }
+
+  /** @private */
+  calculateDuration_() {
+    if (!!this.startTime_) {
+      this.timerDuration_ +=
+          Date.now() - (this.lastPingTime_ || this.startTime_);
+    }
+  }
+
+  /** @return {{timerDuration: number, timerStart: number}} */
+  reportTimerVars() {
+    if (this.isRunning()) {
+      this.calculateDuration_();
+      this.lastPingTime_ = Date.now();
+    }
+    const durationSeconds = Math.floor(this.timerDuration_ / 1000);
+    // Keep track of partial unreported seconds so they can roll over later.
+    this.timerDuration_ -= (durationSeconds * 1000);
+    return {
+      'timerDuration': durationSeconds,
+      'timerStart': this.startTime_ || 0,
+    };
   }
 }
 
@@ -795,7 +837,9 @@ export class TimerEventTracker extends EventTracker {
    */
   startTimer_(timerId, eventType, listener) {
     const timerHandler = this.trackers_[timerId];
-    const timerCallback = listener.bind(this, this.createEvent_(eventType));
+    const timerCallback = () => {
+      listener(this.createEvent_(timerId, eventType));
+    };
     timerHandler.startIntervalInWindow(this.root.ampdoc.win, timerCallback,
         this.removeTracker_.bind(this, timerId));
   }
@@ -809,12 +853,14 @@ export class TimerEventTracker extends EventTracker {
   }
 
   /**
+   * @param {number} timerId
    * @param {string} eventType
    * @return {!AnalyticsEvent}
    * @private
    */
-  createEvent_(eventType) {
-    return new AnalyticsEvent(this.root.getRootElement(), eventType);
+  createEvent_(timerId, eventType) {
+    return new AnalyticsEvent(this.root.getRootElement(), eventType,
+        this.trackers_[timerId].reportTimerVars());
   }
 
   /**
